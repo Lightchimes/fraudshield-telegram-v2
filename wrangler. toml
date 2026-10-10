@@ -1,0 +1,10 @@
+name = "fraudshield-telegram-v2"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[services]]
+binding = "FRAUDSHIELD_API"
+service = "fraudshield-api"
+
+[vars]
+BOT_SECRET = "mySecureSecret12345"

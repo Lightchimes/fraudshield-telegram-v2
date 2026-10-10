@@ -1,54 +1,83 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (url.pathname === "/") return new Response("FraudShield Telegram V2 Live - Go to /setup?secret=YOUR_SECRET");
 
-    if (url.pathname === "/setup") {
-      if (url.searchParams.get("secret")!== env.BOT_SECRET) return new Response("Unauthorized", {status: 401});
-      const webhookUrl = `https://${url.host}/webhook`;
-      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/setWebhook`, {
-        method: "POST",
-        headers: {"content-type": "application/json"},
-        body: JSON.stringify({ url: webhookUrl, secret_token: env.BOT_SECRET })
-      });
-      return new Response(await res.text(), {headers: {"content-type": "application/json"}});
-    }
+    // Telegram webhook will POST here
+    if (request.method === "POST") {
+      try {
+        const update = await request.json();
+        const message = update.message || update.edited_message;
+        if (!message ||!message.text) return new Response("ok");
 
-    if (url.pathname === "/webhook") {
-      if (request.headers.get("X-Telegram-Bot-Api-Secret-Token")!== env.BOT_SECRET) return new Response("Bad secret", {status: 403});
-      const update = await request.json();
-      if (update.message?.text) {
-        const chatId = update.message.chat.id;
-        const text = update.message.text;
-        let reply = "🛡️ FraudShield V2\nSend me a link to check.\nTry: /start";
+        const chatId = message.chat.id;
+        const text = message.text.trim();
+        const token = env.BOT_TOKEN;
 
+        // /start command
         if (text.startsWith("/start")) {
-          reply = "🛡️ FraudShield V2 is LIVE\n\nSend any website link and I will check it.\nExample: https://google.com";
-        } else {
-          const m = text.match(/(https?:\/\/[^\s]+|[a-z0-9.-]+\.[a-z]{2,}[^\s]*)/i);
-          if (m) {
-            try {
-              const apiReq = new Request("https://internal/api/check/website", {
-                method: "POST",
-                headers: {"content-type": "application/json"},
-                body: JSON.stringify({ url: m[0] })
-              });
-              const apiRes = await env.FRAUDSHIELD_API.fetch(apiReq);
-              const data = await apiRes.json();
-              reply = `🔍 Checked: ${m[0]}\n\nScore: ${data.score?? data.risk_score?? 'N/A'}\nResult: ${data.status || JSON.stringify(data).slice(0,200)}`;
-            } catch (e) {
-              reply = `⚠️ API Error: ${e.message}\n\nTell me your API worker name so I can fix the binding.`;
-            }
-          }
+          await sendMessage(token, chatId, "🛡️ *FraudShield Bot is Live!*\n\nSend me any link and I will check if it's a scam.\n\nExample: `https://example.com`", "Markdown");
+          return new Response("ok");
         }
-        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: {"content-type": "application/json"},
-          body: JSON.stringify({ chat_id: chatId, text: reply })
-        });
+
+        // Extract URL from text
+        const urlMatch = text.match(/https?:\/\/[^\s]+/i);
+        if (!urlMatch) {
+          await sendMessage(token, chatId, "Please send a valid link starting with http:// or https://");
+          return new Response("ok");
+        }
+
+        const checkUrl = urlMatch[0];
+        await sendMessage(token, chatId, `🔍 Checking:\n${checkUrl}\nPlease wait...`);
+
+        // Call your FraudShield API via service binding
+        let result;
+        try {
+          // Try service binding first
+          const apiReq = new Request(`https://api.fraudshield/check?url=${encodeURIComponent(checkUrl)}`);
+          const apiRes = await env.FRAUDSHIELD_API.fetch(apiReq);
+          result = await apiRes.json();
+        } catch (e) {
+          // Fallback to direct fetch if binding fails
+          const apiRes = await fetch(`https://fraudshield-api.lightchimes.workers.dev/check?url=${encodeURIComponent(checkUrl)}`, {
+            headers: { "x-api-key": env.API_KEY || "" }
+          });
+          result = await apiRes.json();
+        }
+
+        const isScam = result.isScam || result.risk === "high" || result.score > 70;
+        const score = result.score || result.riskScore || "N/A";
+
+        let reply = "";
+        if (isScam) {
+          reply = `🚨 *SCAM DETECTED!*\n\n🔗 ${checkUrl}\n⚠️ Risk: HIGH\n📊 Score: ${score}\n\n❌ Do NOT visit this link!\nReason: ${result.reason || result.message || "Flagged by FraudShield"}`;
+        } else {
+          reply = `✅ *Seems Safe*\n\n🔗 ${checkUrl}\n📊 Score: ${score}\n\nThis link looks clean, but always be careful.`;
+        }
+
+        await sendMessage(token, chatId, reply, "Markdown");
+
+      } catch (err) {
+        console.error(err);
       }
-      return new Response("OK");
+      return new Response("ok");
     }
-    return new Response("Not found", {status: 404});
+
+    // GET - for setting webhook
+    if (url.pathname === "/setwebhook") {
+      const webhookUrl = `${url.origin}`;
+      const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), { headers: { "Content-Type": "application/json" } });
+    }
+
+    return new Response("FraudShield Telegram Bot is running. Use /setwebhook to set webhook.");
   }
+}
+
+async function sendMessage(token, chatId, text, parse_mode) {
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode })
+  });
 }
